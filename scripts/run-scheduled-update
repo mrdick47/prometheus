@@ -1,0 +1,51 @@
+#!/bin/sh
+# Off-drive wrapper installed by scripts/install-schedule. Locates a
+# PROMETHEUS volume and runs scripts/update. Exits 0 if the drive is
+# not mounted, so a scheduled job stays quiet when the drive is away.
+# shellcheck shell=sh
+set -eu
+
+LABEL=${PROMETHEUS_LABEL:-PROMETHEUS}
+# install-schedule rewrites the next line. A missing path is fine.
+RECORDED_ROOT=${PROMETHEUS_RECORDED_ROOT:-}
+
+try_run() {
+  _root=$1
+  if [ -n "$_root" ] && [ -x "$_root/scripts/update" ]; then
+    exec "$_root/scripts/update" "$@"
+  fi
+  return 1
+}
+
+if [ -n "${PROMETHEUS_ROOT:-}" ]; then
+  try_run "$PROMETHEUS_ROOT" "$@" || true
+fi
+if [ -n "$RECORDED_ROOT" ]; then
+  try_run "$RECORDED_ROOT" "$@" || true
+fi
+if [ -d "/Volumes/$LABEL/scripts" ]; then
+  try_run "/Volumes/$LABEL" "$@" || true
+fi
+if [ -e "/dev/disk/by-label/$LABEL" ] && command -v findmnt >/dev/null 2>&1; then
+  _mp=$(findmnt -n -o TARGET "/dev/disk/by-label/$LABEL" 2>/dev/null || true)
+  if [ -n "$_mp" ]; then
+    try_run "$_mp" "$@" || true
+  fi
+fi
+if command -v lsblk >/dev/null 2>&1; then
+  _mp=$(lsblk -o LABEL,MOUNTPOINT -nr 2>/dev/null | awk -v l="$LABEL" '$1==l && $2!=""{print $2; exit}')
+  if [ -n "$_mp" ]; then
+    try_run "$_mp" "$@" || true
+  fi
+fi
+for _cand in \
+    "/media/${USER:-user}/$LABEL" \
+    "/run/media/${USER:-user}/$LABEL" \
+    "/mnt/$LABEL" \
+    "/media/$LABEL"
+do
+  try_run "$_cand" "$@" || true
+done
+
+# Drive not mounted (or not labeled PROMETHEUS). Quiet success.
+exit 0

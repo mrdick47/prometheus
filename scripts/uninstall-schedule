@@ -1,0 +1,63 @@
+#!/bin/sh
+# Remove the scheduled Prometheus update job installed by install-schedule.
+# shellcheck shell=sh
+set -eu
+
+SCRIPT_PATH=$0
+case "$SCRIPT_PATH" in
+  /*) ;;
+  *) SCRIPT_PATH=$(pwd)/$SCRIPT_PATH ;;
+esac
+
+usage() {
+  cat <<'USAGE'
+Usage: uninstall-schedule
+
+Remove the user crontab lines, systemd --user timer, and/or launchd
+agent that install-schedule created, plus the off-drive wrapper.
+USAGE
+}
+
+for _a in "$@"; do
+  case "$_a" in
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $_a" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+STAMP_DIR=${PROMETHEUS_SCHEDULE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/prometheus}
+WRAPPER=$STAMP_DIR/run-update
+TAG="# prometheus-update"
+
+if command -v crontab >/dev/null 2>&1; then
+  _tmp=$(mktemp)
+  if crontab -l 2>/dev/null | grep -q "$TAG"; then
+    crontab -l 2>/dev/null | grep -v "$TAG" | grep -v "$WRAPPER" >"$_tmp" || true
+    crontab "$_tmp"
+    echo "Removed crontab entries tagged $TAG"
+  fi
+  rm -f "$_tmp"
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl --user list-unit-files prometheus-update.timer >/dev/null 2>&1; then
+    systemctl --user disable --now prometheus-update.timer 2>/dev/null || true
+    systemctl --user daemon-reload 2>/dev/null || true
+    echo "Disabled systemd --user timer prometheus-update.timer"
+  fi
+  _unitdir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+  rm -f "$_unitdir/prometheus-update.timer" "$_unitdir/prometheus-update.service"
+fi
+
+_plist=${HOME}/Library/LaunchAgents/com.prometheus.update.plist
+if [ -f "$_plist" ]; then
+  launchctl unload "$_plist" 2>/dev/null || true
+  rm -f "$_plist"
+  echo "Removed launchd agent $_plist"
+fi
+
+rm -f "$WRAPPER"
+# Remove the stamp dir only if we left it empty.
+rmdir "$STAMP_DIR" 2>/dev/null || true
+echo "Uninstalled Prometheus scheduled update (wrapper $WRAPPER)."
+exit 0

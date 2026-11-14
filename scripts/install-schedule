@@ -1,0 +1,360 @@
+#!/bin/sh
+# One-line installer for a per-user scheduled Prometheus update job.
+# Linux: cron (default) or --systemd. macOS: launchd. Windows: use
+# install-schedule.ps1 instead.
+# shellcheck shell=sh
+set -eu
+
+SCRIPT_PATH=$0
+case "$SCRIPT_PATH" in
+  /*) ;;
+  *) SCRIPT_PATH=$(pwd)/$SCRIPT_PATH ;;
+esac
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+# shellcheck source=lib/hostconf.sh
+. "$SCRIPT_DIR/lib/hostconf.sh"
+# shellcheck source=lib/update-lib.sh
+. "$SCRIPT_DIR/lib/update-lib.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage: install-schedule [--cron|--systemd] [--user NAME]
+
+Install a user-level scheduled job that locates the PROMETHEUS drive
+and runs scripts/update. The schedule comes from config/host.conf for
+this hostname ([default] if there is no matching section).
+
+  --cron       Linux: install a user crontab line (default on Linux)
+  --systemd    Linux: install a systemd --user timer
+  --user NAME  Override the hostname used to look up host.conf
+  --dry-run    Print the planned job lines and wrapper path; write nothing
+  -h, --help   Show this help
+
+The raw cron and schtasks lines are also listed in docs/UPDATE.md.
+Re-run this installer if the drive will usually be mounted at a new
+path; the wrapper also searches for a volume labeled PROMETHEUS.
+USAGE
+}
+
+MODE=auto
+DRY_RUN=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --cron) MODE=cron ;;
+    --systemd) MODE=systemd ;;
+    --dry-run) DRY_RUN=1 ;;
+    --user)
+      shift
+      [ -n "${1:-}" ] || { echo "--user requires a hostname" >&2; exit 2; }
+      PROMETHEUS_HOSTNAME=$1
+      export PROMETHEUS_HOSTNAME
+      ;;
+    --user=*)
+      PROMETHEUS_HOSTNAME=${1#--user=}
+      export PROMETHEUS_HOSTNAME
+      ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+PROMETHEUS_ROOT=$(update_detect_root "$SCRIPT_PATH")
+export PROMETHEUS_ROOT
+hostconf_load
+
+UNAME=$(uname -s)
+if [ "$MODE" = "auto" ]; then
+  case "$UNAME" in
+    Darwin) MODE=launchd ;;
+    Linux) MODE=cron ;;
+    *) MODE=cron ;;
+  esac
+fi
+
+if [ "$UNAME" = "Darwin" ] && [ "$MODE" = "cron" ]; then
+  # cron may exist but launchd is the supported macOS path.
+  MODE=launchd
+fi
+
+STAMP_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/prometheus
+STAMP_DIR=${PROMETHEUS_SCHEDULE_HOME:-$STAMP_DIR}
+WRAPPER=$STAMP_DIR/run-update
+if [ "$DRY_RUN" -eq 0 ]; then
+  mkdir -p "$STAMP_DIR"
+  # Fill in the recorded root from this install, then copy the finder.
+  sed "s|^RECORDED_ROOT=\${PROMETHEUS_RECORDED_ROOT:-}|RECORDED_ROOT=${PROMETHEUS_ROOT}|" \
+    "$SCRIPT_DIR/run-scheduled-update" >"$WRAPPER"
+  chmod +x "$WRAPPER"
+fi
+
+# Hour list helpers for the configured night window (may wrap midnight).
+hours_in_window() {
+  _start=$(hostconf_hm_to_min "$1") || return 1
+  _end=$(hostconf_hm_to_min "$2") || return 1
+  _h=0
+  _out=
+  while [ "$_h" -lt 24 ]; do
+    _hm=$((_h * 60))
+    _ok=0
+    if [ "$_start" -eq "$_end" ]; then
+      _ok=1
+    elif [ "$_start" -lt "$_end" ]; then
+      if [ "$_hm" -ge "$_start" ] && [ "$_hm" -lt "$_end" ]; then _ok=1; fi
+    else
+      if [ "$_hm" -ge "$_start" ] || [ "$_hm" -lt "$_end" ]; then _ok=1; fi
+    fi
+    if [ "$_ok" -eq 1 ]; then
+      if [ -z "$_out" ]; then _out=$_h; else _out="$_out,$_h"; fi
+    fi
+    _h=$((_h + 1))
+  done
+  printf '%s\n' "$_out"
+}
+
+dow_cron() {
+  # Translate allow_days to crontab dow (0=Sun .. 6=Sat). "all" -> *
+  _days=$1
+  if [ -z "$_days" ] || [ "$_days" = "all" ]; then
+    printf '*\n'
+    return
+  fi
+  _out=
+  _old=$IFS
+  IFS=,
+  # shellcheck disable=SC2086
+  set -- $_days
+  IFS=$_old
+  for _d in "$@"; do
+    while [ "$_d" != "${_d# }" ]; do _d=${_d# }; done
+    _dl=$(printf '%s' "$_d" | tr '[:upper:]' '[:lower:]')
+    _n=
+    case "$_dl" in
+      sun|sunday|0) _n=0 ;;
+      mon|monday|1) _n=1 ;;
+      tue|tues|tuesday|2) _n=2 ;;
+      wed|wednesday|3) _n=3 ;;
+      thu|thur|thurs|thursday|4) _n=4 ;;
+      fri|friday|5) _n=5 ;;
+      sat|saturday|6) _n=6 ;;
+    esac
+    [ -n "$_n" ] || continue
+    if [ -z "$_out" ]; then _out=$_n; else _out="$_out,$_n"; fi
+  done
+  printf '%s\n' "${_out:-*}"
+}
+
+# Weekend-night wrap: hours >= night_start apply to allow_days;
+# hours < night_end also apply to the following day.
+# For cron we emit two lines when the window wraps.
+HOUR_LIST=$(hours_in_window "$HOST_NIGHT_START" "$HOST_NIGHT_END")
+MINUTE=${HOST_MINUTE:-0}
+DOW=$(dow_cron "$HOST_ALLOW_DAYS")
+TAG="# prometheus-update"
+
+write_cron_lines() {
+  # Print crontab line(s) without the leading tag (caller adds it).
+  _hours=$HOUR_LIST
+  if [ -z "$_hours" ]; then
+    printf '%s %s * * %s %s\n' "$MINUTE" "${HOST_HOUR:-3}" "$DOW" "$WRAPPER"
+    return
+  fi
+  # If the window wraps midnight and allow_days is not all, split.
+  _sm=$(hostconf_hm_to_min "$HOST_NIGHT_START") || _sm=0
+  _em=$(hostconf_hm_to_min "$HOST_NIGHT_END") || _em=0
+  if [ "$_sm" -gt "$_em" ] && [ "$DOW" != "*" ]; then
+    _late=
+    _early=
+    _old=$IFS
+    IFS=,
+    # shellcheck disable=SC2086
+    set -- $_hours
+    IFS=$_old
+    for _h in "$@"; do
+      if [ "$_h" -ge 12 ]; then
+        if [ -z "$_late" ]; then _late=$_h; else _late="$_late,$_h"; fi
+      else
+        if [ -z "$_early" ]; then _early=$_h; else _early="$_early,$_h"; fi
+      fi
+    done
+    _next=
+    _old=$IFS
+    IFS=,
+    # shellcheck disable=SC2086
+    set -- $DOW
+    IFS=$_old
+    for _d in "$@"; do
+      _n=$(( (_d + 1) % 7 ))
+      if [ -z "$_next" ]; then _next=$_n; else _next="$_next,$_n"; fi
+    done
+    if [ -n "$_late" ]; then
+      printf '%s %s * * %s %s\n' "$MINUTE" "$_late" "$DOW" "$WRAPPER"
+    fi
+    if [ -n "$_early" ]; then
+      printf '%s %s * * %s %s\n' "$MINUTE" "$_early" "$_next" "$WRAPPER"
+    fi
+    return
+  fi
+  printf '%s %s * * %s %s\n' "$MINUTE" "$_hours" "$DOW" "$WRAPPER"
+}
+
+install_cron() {
+  if ! command -v crontab >/dev/null 2>&1; then
+    echo "crontab not found; install cron or re-run with --systemd" >&2
+    exit 1
+  fi
+  _tmp=$(mktemp)
+  crontab -l 2>/dev/null | grep -v "$TAG" | grep -v "$WRAPPER" >"$_tmp" || true
+  write_cron_lines | while IFS= read -r _line; do
+    printf '%s %s\n' "$_line" "$TAG" >>"$_tmp"
+  done
+  crontab "$_tmp"
+  rm -f "$_tmp"
+  echo "Installed user crontab entries (tag: $TAG):"
+  crontab -l | grep -F "$TAG" || true
+}
+
+install_systemd() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "systemctl not found; re-run with --cron" >&2
+    exit 1
+  fi
+  _unitdir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+  mkdir -p "$_unitdir"
+  cat >"$_unitdir/prometheus-update.service" <<SVC
+[Unit]
+Description=Prometheus drive self-updater
+[Service]
+Type=oneshot
+ExecStart=$WRAPPER
+SVC
+  {
+    echo "[Unit]"
+    echo "Description=Prometheus drive self-updater"
+    echo "[Timer]"
+    write_cron_lines | while IFS= read -r _line; do
+      # cron: MIN HOUR * * DOW CMD
+      _min=$(printf '%s\n' "$_line" | awk '{print $1}')
+      _hour=$(printf '%s\n' "$_line" | awk '{print $2}')
+      _dow=$(printf '%s\n' "$_line" | awk '{print $5}')
+      # systemd dow: 0=Sun matches cron. Use *-*-* plus Day-of-week if not *.
+      if [ "$_dow" = "*" ]; then
+        echo "OnCalendar=*-*-* ${_hour}:${_min}:00"
+      else
+        # Map 0-6 to Sun-Sat for OnCalendar.
+        _old=$IFS
+        IFS=,
+        # shellcheck disable=SC2086
+        set -- $_dow
+        IFS=$_old
+        for _d in "$@"; do
+          case "$_d" in
+            0) _name=Sun ;;
+            1) _name=Mon ;;
+            2) _name=Tue ;;
+            3) _name=Wed ;;
+            4) _name=Thu ;;
+            5) _name=Fri ;;
+            6) _name=Sat ;;
+            *) _name=Sun ;;
+          esac
+          echo "OnCalendar=${_name} *-*-* ${_hour}:${_min}:00"
+        done
+      fi
+    done
+    echo "Persistent=true"
+    echo "[Install]"
+    echo "WantedBy=timers.target"
+  } >"$_unitdir/prometheus-update.timer"
+  systemctl --user daemon-reload
+  systemctl --user enable --now prometheus-update.timer
+  echo "Installed systemd --user timer prometheus-update.timer"
+  echo "Note: enable lingering (loginctl enable-linger) if this user is not always logged in."
+}
+
+install_launchd() {
+  _plist=${HOME}/Library/LaunchAgents/com.prometheus.update.plist
+  mkdir -p "$(dirname -- "$_plist")"
+  # Build StartCalendarInterval array from the same hour/dow split as cron.
+  {
+    cat <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.prometheus.update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${WRAPPER}</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+PLIST
+    write_cron_lines | while IFS= read -r _line; do
+      _min=$(printf '%s\n' "$_line" | awk '{print $1}')
+      _hour=$(printf '%s\n' "$_line" | awk '{print $2}')
+      _dow=$(printf '%s\n' "$_line" | awk '{print $5}')
+      _hours=$_hour
+      if [ "$_dow" = "*" ]; then
+        _dows="none"
+      else
+        _dows=$_dow
+      fi
+      _oldifs=$IFS
+      IFS=,
+      # shellcheck disable=SC2086
+      set -- $_hours
+      _hour_items=$*
+      if [ "$_dows" = "none" ]; then
+        set -- none
+      else
+        # shellcheck disable=SC2086
+        set -- $_dows
+      fi
+      _dow_items=$*
+      IFS=$_oldifs
+      for _h in $_hour_items; do
+        for _d in $_dow_items; do
+          echo "    <dict>"
+          echo "      <key>Hour</key><integer>${_h}</integer>"
+          echo "      <key>Minute</key><integer>${_min}</integer>"
+          if [ "$_d" != "none" ]; then
+            # launchd Weekday: 0=Sunday ... 6=Saturday, same as cron.
+            echo "      <key>Weekday</key><integer>${_d}</integer>"
+          fi
+          echo "    </dict>"
+        done
+      done
+    done
+    cat <<'PLIST'
+  </array>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
+PLIST
+  } >"$_plist"
+  launchctl unload "$_plist" 2>/dev/null || true
+  launchctl load "$_plist"
+  echo "Installed launchd agent $_plist"
+}
+
+echo "Drive root: $PROMETHEUS_ROOT"
+echo "Host: $(hostconf_hostname) (section $HOSTCONF_SECTION, schedule $HOST_SCHEDULE)"
+echo "Wrapper: $WRAPPER"
+printf '%s\n' "Cron-style plan:"
+write_cron_lines | sed 's/^/  /'
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "Dry run: nothing installed."
+  exit 0
+fi
+
+case "$MODE" in
+  cron) install_cron ;;
+  systemd) install_systemd ;;
+  launchd) install_launchd ;;
+  *) echo "unknown mode: $MODE" >&2; exit 2 ;;
+esac
+echo "Done. Uninstall with: $SCRIPT_DIR/uninstall-schedule"

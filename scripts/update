@@ -1,0 +1,223 @@
+#!/bin/sh
+# Prometheus self-updater. Lives on the drive. Any host can run it.
+# Finds the drive root from this script's location. Never uses a
+# hardcoded mount path, drive letter, or hostname in the code.
+# shellcheck shell=sh
+
+set -eu
+
+SCRIPT_PATH=$0
+case "$SCRIPT_PATH" in
+  /*) ;;
+  *) SCRIPT_PATH=$(pwd)/$SCRIPT_PATH ;;
+esac
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+# shellcheck source=lib/hostconf.sh
+. "$SCRIPT_DIR/lib/hostconf.sh"
+# shellcheck source=lib/update-lib.sh
+. "$SCRIPT_DIR/lib/update-lib.sh"
+
+usage() {
+  cat <<'USAGE'
+Usage: update [options]
+
+Keep the Prometheus library and indexes current. This script lives on
+the drive and locates the drive root from its own path, so it works
+from any mount point or drive letter.
+
+  --dry-run        Show the host policy, lock state, and planned work
+                   without taking the lock or writing files
+  --force          Ignore the schedule window and market hours (still
+                   pauses at the temperature limit and still uses the lock)
+  --ignore-temp    With --force, also skip the temperature pause
+  --download       Permit catalog downloads if a source URL is set and
+                   PROMETHEUS_ALLOW_DOWNLOAD=1 (default: never fetch)
+  --status         Print lock and last-update state and exit
+  -h, --help       Show this help
+
+Host limits come from config/host.conf (optional). When this machine
+has no section, [default] is used: nightly, low priority. ZEUS is an
+example of a tighter weekend-night, heat-aware host.
+
+Exits 0 if the drive is missing, read-only, already being updated,
+outside the allowed window, or paused for heat, so a scheduled job
+can stay quiet when the drive has been unplugged.
+USAGE
+}
+
+FLAG_DRY=0
+FLAG_FORCE=0
+FLAG_IGNORE_TEMP=0
+FLAG_DOWNLOAD=0
+FLAG_STATUS=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --dry-run) FLAG_DRY=1 ;;
+    --force) FLAG_FORCE=1 ;;
+    --ignore-temp) FLAG_IGNORE_TEMP=1 ;;
+    --download) FLAG_DOWNLOAD=1 ;;
+    --status) FLAG_STATUS=1 ;;
+    *)
+      printf 'unknown argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+PROMETHEUS_ROOT=$(update_detect_root "$SCRIPT_PATH")
+export PROMETHEUS_ROOT
+mkdir -p "$PROMETHEUS_ROOT/run/logs" 2>/dev/null || true
+UPDATE_LOG_FILE=${PROMETHEUS_ROOT}/run/logs/update.log
+export UPDATE_LOG_FILE
+# If the drive is read-only we still want stdout logs; file may fail.
+hostconf_load
+update_log INFO "drive root: $PROMETHEUS_ROOT"
+update_log INFO "host: $(hostconf_hostname) (host.conf section ${HOSTCONF_SECTION})"
+
+update_print_status() {
+  _lock=$(update_lock_dir)
+  if [ -d "$_lock" ]; then
+    printf 'lock: held\n'
+    if [ -f "$_lock/owner" ]; then
+      cat "$_lock/owner"
+    fi
+    printf 'lock_age_sec=%s\n' "$(update_lock_age_sec "$_lock")"
+  else
+    printf 'lock: none\n'
+  fi
+  if [ -f "$PROMETHEUS_ROOT/run/last-update" ]; then
+    printf 'last_update=%s\n' "$(cat "$PROMETHEUS_ROOT/run/last-update")"
+  else
+    printf 'last_update=never\n'
+  fi
+  _temp=$(hostconf_read_temp_c)
+  if [ -n "$_temp" ]; then
+    printf 'temperature_c=%s (pause at %s)\n' "$_temp" "$HOST_PAUSE_TEMP_C"
+  else
+    printf 'temperature_c=unavailable (check skipped)\n'
+  fi
+  printf 'index_device=%s\n' "$(update_index_device)"
+  printf 'schedule=%s allow_days=%s window=%s-%s tz=%s\n' \
+    "$HOST_SCHEDULE" "$HOST_ALLOW_DAYS" "$HOST_NIGHT_START" "$HOST_NIGHT_END" \
+    "${HOST_TIMEZONE:-local}"
+}
+
+if [ "$FLAG_STATUS" -eq 1 ]; then
+  update_print_status
+  exit 0
+fi
+
+# Policy check (schedule, market hours, temperature).
+POLICY_REASON="permitted: --force"
+POLICY_OK=1
+if [ "$FLAG_FORCE" -eq 1 ]; then
+  if [ "$FLAG_IGNORE_TEMP" -eq 0 ] && hostconf_over_temp; then
+    POLICY_OK=0
+    POLICY_REASON=$(printf 'paused: CPU temperature %sC is at or above %sC' "$(hostconf_read_temp_c)" "$HOST_PAUSE_TEMP_C")
+  else
+    _t=$(hostconf_read_temp_c)
+    if [ -n "$_t" ]; then
+      POLICY_REASON="permitted: --force (temperature ${_t}C)"
+    else
+      POLICY_REASON="permitted: --force (temperature unavailable)"
+    fi
+  fi
+else
+  if POLICY_REASON=$(hostconf_update_permitted); then
+    POLICY_OK=1
+  else
+    POLICY_OK=0
+  fi
+fi
+update_log INFO "$POLICY_REASON"
+
+if [ "$FLAG_DRY" -eq 1 ]; then
+  update_print_status
+  printf 'policy: %s\n' "$POLICY_REASON"
+  _dev=$(update_index_device)
+  printf 'planned: check Kiwix catalog, verify checksums, incremental re-index on %s, atomic swap with one previous version\n' "$_dev"
+  if [ ! -f "$PROMETHEUS_ROOT/config/sources.conf" ] || ! grep -E -q '^\[|^filename=' "$PROMETHEUS_ROOT/config/sources.conf" 2>/dev/null; then
+    printf 'planned: no catalog sources are configured yet; no downloads would run\n'
+  fi
+  if [ "$FLAG_DOWNLOAD" -ne 1 ] || [ "${PROMETHEUS_ALLOW_DOWNLOAD:-0}" != "1" ]; then
+    printf 'planned: downloads disabled (pass --download and set PROMETHEUS_ALLOW_DOWNLOAD=1 to enable)\n'
+  fi
+  exit 0
+fi
+
+if [ "$POLICY_OK" -ne 1 ]; then
+  # Quiet, clean exit for schedulers.
+  exit 0
+fi
+
+# Lock (and read-only / missing drive).
+LOCK_RC=0
+update_lock_acquire || LOCK_RC=$?
+if [ "$LOCK_RC" -eq 2 ]; then
+  # Missing or read-only: already logged.
+  exit 0
+fi
+if [ "$LOCK_RC" -ne 0 ]; then
+  exit 0
+fi
+trap 'update_lock_release' EXIT INT HUP TERM
+
+if update_already_done_today && [ "$FLAG_FORCE" -eq 0 ]; then
+  update_log INFO "already updated today ($(cat "$PROMETHEUS_ROOT/run/last-update")); nothing to do"
+  exit 0
+fi
+
+update_lock_heartbeat
+
+# Catalog walk. This build does not fetch ZIMs, maps, or models.
+# Phase 2 will fill config/sources.conf; until then we apply no payload
+# and still exercise policy, lock, priority, and index-device selection.
+SOURCES=$PROMETHEUS_ROOT/config/sources.conf
+PENDING=0
+if [ -f "$SOURCES" ]; then
+  # Count configured source stanzas that have a url= value that is not empty.
+  PENDING=$(awk '
+    /^[ \t]*#/ {next}
+    /^url=/ {
+      val=substr($0,5)
+      if (val != "") n++
+    }
+    END {print n+0}
+  ' "$SOURCES")
+fi
+
+if [ "$PENDING" -gt 0 ]; then
+  if [ "$FLAG_DOWNLOAD" -eq 1 ] && [ "${PROMETHEUS_ALLOW_DOWNLOAD:-0}" = "1" ]; then
+    update_log INFO "catalog has ${PENDING} source URL(s), but the download step is not enabled in this build (Phase 2). No files will be fetched."
+  else
+    update_log INFO "catalog has ${PENDING} source URL(s); downloads are disabled unless --download and PROMETHEUS_ALLOW_DOWNLOAD=1 are both set. Skipping fetch."
+  fi
+else
+  update_log INFO "no catalog URLs configured; skipping fetch (library unchanged)"
+fi
+
+# Incremental re-index hook (Phase 4). Unrelated sources stay untouched
+# when the hook exists and is passed a single source name later.
+DEVICE=$(update_index_device)
+REINDEX=$SCRIPT_DIR/reindex
+if [ -x "$REINDEX" ]; then
+  update_log INFO "running incremental re-index on ${DEVICE}"
+  if ! update_low_priority "$REINDEX" --incremental --device "$DEVICE"; then
+    update_log ERROR "reindex failed; leaving the previous library and index in place"
+    exit 1
+  fi
+else
+  if [ "$DEVICE" = "gpu" ]; then
+    update_log INFO "no scripts/reindex hook yet; would use the GPU for a heavy re-index"
+  else
+    update_log INFO "no scripts/reindex hook yet; would fall back to slow incremental CPU indexing"
+  fi
+fi
+
+update_stamp_success
+update_log INFO "update finished (no payload applied in this build)"
+exit 0

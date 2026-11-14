@@ -1,0 +1,75 @@
+# Prometheus ignores large offline data, runtime state, and OS junk.
+# Scripts, docs, and config stay in git; ZIMs, maps, models, and indexes do not.
+
+# Runtime (PID files, logs, health scratch)
+/run/
+*.pid
+*.log
+
+# Kiwix ZIM library
+*.zim
+*.zim.sha*
+*.zimaa
+*.zimab
+
+# OpenStreetMap / offline tiles
+*.pmtiles
+*.mbtiles
+*.pbf
+*.osm
+*.osm.pbf
+*.osm.bz2
+
+# Model weights and llamafile bundles
+*.gguf
+*.ggml
+*.llamafile
+*.bin
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.npz
+
+# ISOs and disk images
+*.iso
+*.img
+*.dmg
+
+# Vector indexes and embeddings (keep docs, drop data)
+*.lance
+*.index
+chroma.sqlite3
+
+# Data trees: keep only README / .gitkeep placeholders
+/library/**
+!/library/README.md
+/maps/**
+!/maps/README.md
+/index/**
+!/index/README.md
+/models/**
+!/models/README.md
+!/models/low/
+!/models/mid/
+!/models/high/
+!/models/embed/
+!/models/low/README.md
+!/models/mid/README.md
+!/models/high/README.md
+!/models/embed/README.md
+/apps/**
+!/apps/README.md
+/iso/**
+!/iso/README.md
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+*.swp
+*.swo
+.idea/
+.vscode/

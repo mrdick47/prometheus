@@ -73,3 +73,8 @@ desktop.ini
 *.swo
 .idea/
 .vscode/
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/

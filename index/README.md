@@ -7,3 +7,8 @@ One vector index (or subdirectory) per library source, built in Phase 4
 Each article should carry a hash/fingerprint so later updates on ZEUS
 only re-embed changed articles. Index data is gitignored; all model
 tiers share these indexes.
+
+Built and maintained by `scripts/index` (see [docs/INDEX.md](../docs/INDEX.md)):
+`index/<source>/` holds `state.db` and int8 vector segments, and only offsets
+and content hashes, never chunk text. Each index lives on the same drive as its
+source ZIM.

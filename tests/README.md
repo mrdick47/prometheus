@@ -34,3 +34,16 @@ POSIX updater, `shellcheck -x -P SCRIPTDIR` for the bash launchers).
 PowerShell scripts are included for Windows but are not executed on
 the Linux box; run PSScriptAnalyzer on a Windows or `pwsh` machine
 when one is available.
+
+## Indexer tests (BAC-150 / BAC-188 / BAC-189)
+
+```bash
+python -m pip install pytest libzim numpy
+python -m pytest tests/index -q
+```
+
+Build tiny ZIMs on the fly and cover atomic writes, locks, build, incremental
+update (changed/new/deleted), crash then resume (and equality with a clean
+build), interrupt/pause/resume/cancel, rebuild swap and failed rebuild,
+interrupted-swap recovery, model-mismatch, and verify (corrupt, missing, orphan,
+stale, bad database).

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Prometheus indexer entry point. Finds the drive root from its own path.
+# Usage: index build|update|rebuild|verify|status|remove|query|pause|resume|cancel|jobs <source|all>
+# shellcheck shell=sh
+set -eu
+SCRIPT_PATH=$0
+case "$SCRIPT_PATH" in /*) ;; *) SCRIPT_PATH=$(pwd)/$SCRIPT_PATH ;; esac
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
+PY=${PROMETHEUS_PYTHON:-}
+if [ -z "$PY" ]; then
+  for c in "$ROOT/run/venv-index/bin/python" python3 python; do
+    if command -v "$c" >/dev/null 2>&1 || [ -x "$c" ]; then PY=$c; break; fi
+  done
+fi
+[ -n "$PY" ] || { echo "index: Python 3.9+ not found" >&2; exit 2; }
+PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m prometheus_index "$@"

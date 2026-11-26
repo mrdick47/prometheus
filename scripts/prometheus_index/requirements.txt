@@ -1,0 +1,7 @@
+# Runtime deps for scripts/index. Install into run/venv-index (see docs/INDEX.md).
+numpy>=1.24
+libzim>=3.4
+tokenizers>=0.15
+onnxruntime>=1.17        # CPU; on a CUDA host install onnxruntime-gpu instead
+pypdf>=4.0               # text-layer PDFs (optional; scanned PDFs need OCR)
+fonttools>=4.0        # part of the extractor identity; install it on every host (consistent offsets)

@@ -210,6 +210,11 @@ def query(srcs: list[Source], emb: Embedder, text: str, k: int = 5) -> list[dict
         try:
             if st.get("model") != emb.name:
                 continue
+            if st.get("extractor") != extract.EXTRACTOR_VERSION:
+                # offsets were computed by a different extractor: slicing would return wrong text
+                print(f"warning: {s.label}: extractor mismatch, skipped (run index rebuild {s.id})",
+                      file=__import__("sys").stderr)
+                continue
             arc = Archive(str(s.zim))
             for h in st.search(q, k=k):
                 try:

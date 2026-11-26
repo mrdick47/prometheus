@@ -375,3 +375,11 @@ def test_update_after_errors_retries_instead_of_fast_path(env):
     st.close()
     r = run(env, s, "update")
     assert r["status"] == "ok" and r["errors"] == 0
+
+
+def test_query_skips_index_built_with_other_extractor(env, monkeypatch):
+    s = env.zim()
+    run(env, s)
+    assert ops.query([s], env.emb, "alpha", k=2)
+    monkeypatch.setattr("prometheus_index.extract.EXTRACTOR_VERSION", "other")
+    assert ops.query([s], env.emb, "alpha", k=2) == []

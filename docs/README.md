@@ -7,7 +7,8 @@ printable sheet (BAC-156; print and tape it to the drive later).
 
 The layout plan is in [LAYOUT.md](LAYOUT.md). The portable
 self-updater (any host, ZEUS as the first example) is documented in
-[UPDATE.md](UPDATE.md).
+[UPDATE.md](UPDATE.md). The indexer (`scripts/index`) is documented in
+[INDEX.md](INDEX.md).
 
 ## Manual start and stop
 

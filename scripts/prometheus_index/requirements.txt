@@ -4,4 +4,5 @@ libzim>=3.4
 tokenizers>=0.15
 onnxruntime>=1.17        # CPU; on a CUDA host install onnxruntime-gpu instead
 pypdf>=4.0               # text-layer PDFs (optional; scanned PDFs need OCR)
+cryptography>=3.1        # required by pypdf to open AES-encrypted PDFs
 fonttools>=4.0        # part of the extractor identity; install it on every host (consistent offsets)

@@ -51,6 +51,8 @@ text is obtained by reading the entry from the ZIM, running the deterministic
 extractor (`extract.EXTRACTOR_VERSION`, recorded per index) and slicing the bytes.
 PDF entries with a text layer are indexed through `pypdf`; PDFs without
 text are counted as `needs_ocr_pdfs` and recorded without chunks.
+`pypdf` needs `cryptography>=3.1` to open AES-encrypted PDFs; without it
+those entries are skipped with `DependencyError`.
 
 Embedding model: **bge-small-en-v1.5** (33 M parameters, 384-d, fp32 ONNX,
 about 130 MB) in `models/embed/bge-small-en-v1.5/` (`embed.json`, `model.onnx`,
@@ -118,6 +120,12 @@ python3 -m venv run/venv-index
 run/venv-index/bin/pip install -r scripts/prometheus_index/requirements.txt   # Windows: run\venv-index\Scripts\pip
 scripts/index fetch-model
 ```
+
+That requirements file includes `cryptography>=3.1`, which `pypdf` needs
+to open AES-encrypted PDFs, and `fonttools>=4.0`, which is part of the
+extractor identity. A fresh host should install from that file rather than
+picking packages by hand. `scripts/index` and `scripts/index.ps1` use the
+venv but do not install dependencies themselves.
 
 On a CUDA host use `onnxruntime-gpu` (plus the CUDA 12 / cuDNN 9 runtime, e.g. the
 `nvidia-*-cu12` pip wheels) instead of `onnxruntime`. `scripts/index status` and

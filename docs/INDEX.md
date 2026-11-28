@@ -20,6 +20,7 @@ scripts\index.ps1 build|update|rebuild|verify|status <source|all>  (Windows)
 | `index remove <source> [--yes]` | Delete one source's index (asks first). |
 | `index pause\|resume\|cancel <source> [--discard]` | Control a running job from another shell (see below). |
 | `index jobs` | Running, paused, interrupted jobs with progress and ETA. |
+| `index clone --to <drive> [--plan]` | Copy finished indexes from this drive to another drive without re-embedding (see "Cloning to another drive"). |
 | `index fetch-model` | Download the default embedding model into `models/embed/` (network; verified by SHA-256). Normal operation is offline. |
 
 Common options: `--drive PATH` (repeatable, or `PROMETHEUS_DRIVES`) adds
@@ -39,7 +40,7 @@ they stay queued), `--priority low|normal` (low is the default),
 
 ## What is stored (and not)
 
-Per source, on **the same drive as the source ZIM**: `<drive>/index/<source>/`.
+Per source, on **the same drive as the source ZIM** (a shared-layout clone, see below, can also place a copy on another drive): `<drive>/index/<source>/`.
 
 * `state.db`: sqlite (rollback journal, `synchronous=FULL`): meta, segment
   table with SHA-256s, article table (`path`, content hash, segment, row range).
@@ -94,6 +95,94 @@ an ANN structure or binary quantization + rerank before the largest sources).
   `--discard` also deletes the partial work: a never-finished build or a partial
   rebuild directory. A finished index is never deleted by a cancel.
 * Job state lives in `<drive>/run/index-jobs/<source>.json`; `index jobs` lists it.
+
+## Cloning to another drive (`index clone`, `scripts/clone-drive`)
+
+Embedding the same source twice (once per drive) gives byte-identical indexes, so a
+second drive gets its indexes by copying the finished ones from the first. This is a
+standalone command, run on its own after the build on the big drive has finished. It
+never embeds, never writes to the source drive (apart from the usual lock and job
+files) and works on any drive pair; the source is the drive the scripts live on, or
+`--from PATH`.
+
+```
+scripts/index clone --to <target drive root> --plan          # show the plan, write nothing
+scripts/index clone --to <target drive root>                 # do it
+scripts/clone-drive --to <target drive root> [options]       # same thing (clone-drive.ps1 on Windows)
+```
+
+Options: `--plan` (alias `--dry-run`), `--layout auto|standalone|shared`, `--with-content`
+(also copy a source's ZIM, with its `run/verified` marker, when the target lacks it),
+`--budget-gb N`, `--headroom-gb N`, `--replace`, `--deep` (hash whole ZIMs and re-check every
+segment checksum when comparing), `--discard`, `--json`, and source ids to narrow it down.
+
+What it decides, per source on the source drive (verified, not deferred, finished and
+not stale index):
+
+1. **Preset.** `config/clone.conf` on the target drive (else the source drive) lists the
+   sources that drive should hold, in priority order. Unlisted sources are skipped.
+   No list = everything.
+2. **Content must match.** The target's ZIM for that source has to be the same file
+   (ZIM UUID in the header and size; `--deep` also compares SHA-256). A different ZIM
+   (other version or content) is **flagged and skipped** (`zim-differs`); it is never overwritten.
+   Embed that source on the target instead (`scripts/index build|rebuild`), or update the ZIM first.
+3. **Layout (mode).**
+   * `standalone` (mirror, the default): an index is copied only for content the target
+     holds. A source whose ZIM is not on the target is skipped (`no-local-content`) and
+     logged, unless `--with-content` copies the ZIM too.
+   * `shared` (BAC-187 drive set): the target may also hold indexes for content stored on
+     the other drive, so those are copied without their ZIM.
+   `auto` picks `shared` when both drives carry a `prometheus-drive.json` with the same
+   `set_id` (the BAC-187 member-drive marker) and `standalone` otherwise. `--layout` or
+   `layout=` in `clone.conf` overrides it. Note: a shared-layout index on a drive without its ZIM
+   shows as `orphaned` in `status` on that drive alone and is not queried until its ZIM is connected.
+4. **Fit budget.** Content plus index are budgeted together: for each source the cost is
+   the ZIM bytes (only when `--with-content` has to copy it) **plus the index bytes**. The
+   budget is `budget_gb` / `--budget-gb`, else target free space minus `headroom_gb`
+   (space held by a half-finished earlier clone counts as free). Sources are fitted in
+   preset order; one that does not fit is `excluded` with the numbers, and the rest
+   are still tried.
+5. **Existing target index.** Identical (same ZIM and config signature) = `up-to-date`.
+   A different finished index is left alone unless `--replace`. A partial, failed or
+   corrupt target index is replaced.
+
+How a copy stays safe:
+
+* Files are copied (SHA-256 taken while reading the source) into `index/.<source>.clone/`
+  on the target, as `*.tmp` and renamed per file. Segment files are also checked against
+  the checksums recorded in the source's `state.db`, so a damaged source index is
+  reported (`SourceCorrupt`) and not copied. `state.db` goes last.
+* Every copied file is re-hashed, the copy's `state.db` is opened and checked, and only
+  then is the staging directory renamed over `index/<source>` (old index kept until the
+  rename is done; a crash in between is repaired by the next run). A file that fails
+  verification is recopied once; if it still fails the staging is removed and the source is
+  reported `failed`. A half index is never visible as `index/<source>`.
+* `.clone.json` in the staging directory is the resume state (finished files and the
+  identity of the source index). Rerun the same command to resume: finished files are
+  skipped, a partly written file is compared with the source and continued from the last
+  good byte, and if the source index changed meanwhile the staging is dropped and redone.
+* Pause/resume/cancel use the BAC-189 control files: `index pause|resume|cancel <source>`
+  (written to the source drive, or to the target with `--drive <target>`; both are
+  checked), Ctrl-C/SIGTERM checkpoints and exits 130. `cancel --discard` removes the
+  staging. `index jobs` lists clone jobs (`mode clone`) on the target drive.
+* Unplugged drive: any I/O error is checked against the two drive roots. If one is gone the run
+  stops with exit code 4, keeping the staging only. Replug and rerun. The source index is only
+  ever read.
+* A source whose index lock is held (an index job is still running on it) is `locked` and skipped.
+
+Exit codes: 0 ok (skips and exclusions are normal), 1 a source failed or was locked, 2 usage or
+drive not found, 3 cancelled, 4 drive unplugged, 130 interrupted. The log
+(`<source drive>/run/logs/index/<time>-clone.log`) ends with a summary of copied, up-to-date,
+skipped (with reasons), excluded and failed sources and the bytes copied.
+
+Runbook after a full build on the big drive for the 1 TB drive (for example J:\ to I:\):
+
+1. Make sure no index job is running (`scripts/index jobs`); the build must have finished.
+2. `scripts/index clone --to I:\ --plan` and read the table: expect `copy` for sources both drives hold,
+   `skip no-local-content` for the rest, `zim-differs` for any ZIM that is not identical.
+3. `scripts/index clone --to I:\`. Pause with `scripts/index pause all`, Ctrl-C is also fine.
+4. If it stops (unplug, power), replug and run the same command again.
+5. `scripts/index verify all --drive I:\` (add `--deep` for a full re-hash) and `scripts/index status --drive I:\`.
 
 ## Host limits and logs
 

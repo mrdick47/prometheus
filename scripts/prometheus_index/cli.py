@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import clone as clonemod
 from . import ops
 from .config import discover_sources, drives_from, find_root, load_settings
 from .embed import load_embedder
@@ -15,7 +16,7 @@ from .engine import (Cancelled, Interrupted, Log, Run, Stopper, config_signature
                      write_control)
 
 CMDS = ["build", "update", "rebuild", "verify", "status", "remove", "query", "pause",
-        "resume", "cancel", "jobs", "fetch-model"]
+        "resume", "cancel", "jobs", "fetch-model", "clone"]
 
 
 def set_low_priority() -> None:
@@ -48,6 +49,21 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--deep", action="store_true", help="verify: re-hash every segment")
     p.add_argument("--samples", type=int, default=5, help="verify: articles to spot-check")
     p.add_argument("-k", type=int, default=5, help="query: number of hits")
+    p.add_argument("--to", metavar="PATH", help="clone: target drive root")
+    p.add_argument("--from", dest="src_drive", metavar="PATH",
+                   help="clone: source drive root (default: the drive this script is on)")
+    p.add_argument("--plan", "--dry-run", dest="plan", action="store_true",
+                   help="clone: show what would be copied and why, write nothing")
+    p.add_argument("--layout", choices=clonemod.LAYOUTS, default="auto",
+                   help="clone: standalone (mirror) or shared (BAC-187 drive set); auto reads "
+                        "prometheus-drive.json on both drives, else standalone")
+    p.add_argument("--with-content", action="store_true",
+                   help="clone: also copy a source's ZIM when the target lacks it")
+    p.add_argument("--budget-gb", type=float, default=0,
+                   help="clone: max GiB to add (content + indexes); default target free - headroom")
+    p.add_argument("--headroom-gb", type=float, default=None, help="clone: free space to leave")
+    p.add_argument("--replace", action="store_true",
+                   help="clone: overwrite a different finished index on the target")
     p.add_argument("--json", action="store_true")
     p.add_argument("--no-log-file", action="store_true")
     p.add_argument("--crash-after", type=int, default=None, help=argparse.SUPPRESS)
@@ -89,7 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     echo_json = a.json
 
     log_path = None
-    if cmd in ("build", "update", "rebuild", "verify") and not a.no_log_file:
+    if (cmd in ("build", "update", "rebuild", "verify") or (cmd == "clone" and not a.plan)) \
+            and not a.no_log_file:
         log_path = root / "run" / "logs" / "index" / f"{time.strftime('%Y%m%d-%H%M%S')}-{cmd}.log"
     log = Log(log_path)
 
@@ -120,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{cmd} requested for {s.label}")
                 n += 1
         return 0 if n else 1
+
+    if cmd == "clone":
+        return clonemod.run_cli(a, root, settings, log)
 
     if cmd == "fetch-model":
         name = a.model or "bge-small-en-v1.5"

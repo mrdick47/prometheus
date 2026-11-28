@@ -98,6 +98,11 @@ class Source:
         return self.drive / "index" / f".{self.id}.old"
 
     @property
+    def clone_dir(self) -> Path:
+        """Staging dir for `index clone` (verified, then renamed over index/<id>)."""
+        return self.drive / "index" / f".{self.id}.clone"
+
+    @property
     def label(self) -> str:
         return f"{self.id}@{self.drive}"
 

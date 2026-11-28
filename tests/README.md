@@ -47,3 +47,10 @@ update (changed/new/deleted), crash then resume (and equality with a clean
 build), interrupt/pause/resume/cancel, rebuild swap and failed rebuild,
 interrupted-swap recovery, model-mismatch, and verify (corrupt, missing, orphan,
 stale, bad database).
+
+Clone tests (`tests/index/test_clone.py`): matching ZIM copies and verifies, ZIM mismatch is
+skipped and flagged, priority preset filtering and order, standalone vs shared layout
+(same source with no local content: skipped vs copied), content plus index bytes in the fit
+budget, interrupted copy resumes (torn partial file too), verify repairs or refuses a corrupted
+copy, a damaged source is not propagated, unplugged target (exit 4) and resume after replug,
+pause/cancel/stop signal, locked source, `--plan` writes nothing, CLI summary and exit codes.

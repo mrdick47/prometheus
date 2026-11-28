@@ -1,0 +1,9 @@
+#!/bin/sh
+# Clone finished indexes (and optionally ZIMs) from this drive to another: scripts/index clone.
+# Usage: clone-drive --to <target drive root> [--plan] [--with-content] [--layout shared] [source ...]
+# shellcheck shell=sh
+set -eu
+SCRIPT_PATH=$0
+case "$SCRIPT_PATH" in /*) ;; *) SCRIPT_PATH=$(pwd)/$SCRIPT_PATH ;; esac
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+exec "$SCRIPT_DIR/index" clone "$@"

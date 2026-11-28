@@ -69,6 +69,7 @@ via `sh` or `bash` (for example `sh scripts/start-library.sh`).
 | `scripts/start-library.sh` / `scripts/start-library.ps1` | Start kiwix-serve only |
 | `scripts/start-ai.sh` / `scripts/start-ai.ps1` | Start llamafile (and RAG if configured) after the library is healthy. Pass `low`, `mid`, or `high` to pick a tier. |
 | `scripts/start-auto.sh` / `scripts/start-auto.ps1` | Start the library first, then pick the best llamafile tier from RAM and GPU and start it. Falls back to library-only. |
+| `scripts/clone-drive` / `scripts/clone-drive.ps1` | Copy finished vector indexes (and optionally ZIMs) to another drive with checksums, resumable, `--plan` first. See [docs/INDEX.md](docs/INDEX.md). |
 | `scripts/stop.sh` / `scripts/stop.ps1` | Stop the AI (if any) then the library. Safe to run when nothing is running. |
 
 On Windows, if script execution is blocked:

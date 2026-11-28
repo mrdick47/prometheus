@@ -12,3 +12,6 @@ Built and maintained by `scripts/index` (see [docs/INDEX.md](../docs/INDEX.md)):
 `index/<source>/` holds `state.db` and int8 vector segments, and only offsets
 and content hashes, never chunk text. Each index lives on the same drive as its
 source ZIM.
+
+`scripts/index clone --to <drive>` copies finished indexes to another drive instead of
+embedding them again (see docs/INDEX.md, "Cloning to another drive").
